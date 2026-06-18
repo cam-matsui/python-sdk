@@ -2,7 +2,7 @@ import dataclasses
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 from . import globals
 from .config_evaluation import _ConfigEvaluation
@@ -346,6 +346,36 @@ class StatsigServer:
             task,
             lambda: DynamicConfig({}, experiment_name, ""),
             {"configName": experiment_name},
+        )
+
+    def get_experiment_groups(self, experiment_name: str) -> List[Dict]:
+        """
+        Returns the group name and return value for each group in the given experiment.
+
+        :param experiment_name: The name of the experiment
+        :return: A list of dicts, each containing 'group_name' and 'return_value' for a group
+        """
+        def task():
+            if not self._initialized:
+                raise StatsigRuntimeError(
+                    "Must call initialize before checking gates/configs/experiments or logging events"
+                )
+
+            spec = self._spec_store.get_config(experiment_name)
+            if spec is None or spec.get("entity") != "experiment":
+                return []
+
+            return [
+                {
+                    "group_name": rule.get("groupName"),
+                    "return_value": rule.get("returnValue", {}),
+                }
+                for rule in spec.get("rules", [])
+                if rule.get("isExperimentGroup") is not False
+            ]
+
+        return self._errorBoundary.capture(
+            "get_experiment_groups", task, lambda: [], {"configName": experiment_name}
         )
 
     def manually_log_experiment_exposure(self, user: StatsigUser, experiment_name: str):
