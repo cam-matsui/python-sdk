@@ -15,10 +15,31 @@ _network_stub = NetworkStub(_api_override)
 _options = StatsigOptions(api=_api_override, disable_diagnostics=True)
 
 
-def _setup_network_stub():
+def _make_specs_with_active_experiment():
+    """
+    Return a copy of the base config specs with sample_experiment patched to
+    reflect what production specs look like:
+      - isActive: True
+      - experiment group rules have isExperimentGroup: True
+      - the sizing/allocation rule (empty id) does NOT have isExperimentGroup set
+    """
+    specs = json.loads(CONFIG_SPECS_RESPONSE)
+    for config in specs["dynamic_configs"]:
+        if config["name"] == "sample_experiment":
+            config["isActive"] = True
+            for rule in config["rules"]:
+                # Real group rules have a non-empty id and isExperimentGroup: True
+                if rule.get("id"):
+                    rule["isExperimentGroup"] = True
+            break
+    return specs
+
+
+def _setup_network_stub(specs=None):
     _network_stub.reset()
     _network_stub.stub_request_with_value(
-        "download_config_specs/.*", 200, json.loads(CONFIG_SPECS_RESPONSE)
+        "download_config_specs/.*", 200,
+        specs if specs is not None else json.loads(CONFIG_SPECS_RESPONSE)
     )
     _network_stub.stub_request_with_value("log_event", 202, {})
 
@@ -29,7 +50,7 @@ class TestGetExperimentGroupsOnServer(unittest.TestCase):
 
     @patch('requests.Session.request', side_effect=_network_stub.mock)
     def setUp(self, mock_request):
-        _setup_network_stub()
+        _setup_network_stub(_make_specs_with_active_experiment())
         self._server = StatsigServer()
         self._server.initialize("secret-key", _options)
 
@@ -53,8 +74,8 @@ class TestGetExperimentGroupsOnServer(unittest.TestCase):
         groups = self._server.get_experiment_groups("sample_experiment")
 
         group_names = [g["group_name"] for g in groups]
-        self.assertIn("Control", group_names)
-        self.assertIn("Test", group_names)
+        # Exactly the two variant groups — sizing rule must not appear
+        self.assertEqual(sorted(group_names), ["Control", "Test"])
 
     def test_return_values_match_spec(self, mock_request):
         groups = self._server.get_experiment_groups("sample_experiment")
@@ -86,30 +107,31 @@ class TestGetExperimentGroupsOnServer(unittest.TestCase):
 
         self.assertEqual(groups, [])
 
-    def test_filters_out_non_experiment_groups(self, mock_request):
-        # Inject a spec where one rule has isExperimentGroup=False
-        specs = json.loads(CONFIG_SPECS_RESPONSE)
+    def test_filters_out_sizing_rule_without_is_experiment_group(self, mock_request):
+        # The experimentSize/allocation rule has no isExperimentGroup field (absent = False).
+        # It must not appear in the returned groups.
+        groups = self._server.get_experiment_groups("sample_experiment")
+        group_names = [g["group_name"] for g in groups]
+
+        self.assertNotIn("experimentSize", group_names)
+
+    def test_returns_empty_list_for_inactive_experiment(self, mock_request):
+        # An experiment with isActive=False (or absent) should return []
+        specs = _make_specs_with_active_experiment()
         for config in specs["dynamic_configs"]:
             if config["name"] == "sample_experiment":
-                config["rules"][0]["isExperimentGroup"] = False
+                config["isActive"] = False
                 break
 
         _network_stub.reset()
-        _network_stub.stub_request_with_value(
-            "download_config_specs/.*", 200, specs
-        )
+        _network_stub.stub_request_with_value("download_config_specs/.*", 200, specs)
         _network_stub.stub_request_with_value("log_event", 202, {})
 
         server = StatsigServer()
         server.initialize("secret-key", _options)
 
         groups = server.get_experiment_groups("sample_experiment")
-        group_names = [g["group_name"] for g in groups]
-
-        # The first rule had isExperimentGroup=False and should be excluded
-        self.assertNotIn("experimentSize", group_names)
-        self.assertIn("Control", group_names)
-        self.assertIn("Test", group_names)
+        self.assertEqual(groups, [])
 
         server.shutdown()
 
@@ -121,7 +143,7 @@ class TestGetExperimentGroupsModuleLevel(unittest.TestCase):
     @classmethod
     @patch('requests.Session.request', side_effect=_network_stub.mock)
     def setUpClass(cls, mock_request):
-        _setup_network_stub()
+        _setup_network_stub(_make_specs_with_active_experiment())
         statsig.initialize("secret-key", _options)
 
     @classmethod

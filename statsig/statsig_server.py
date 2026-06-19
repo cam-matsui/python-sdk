@@ -365,13 +365,16 @@ class StatsigServer:
             if spec is None or spec.get("entity") != "experiment":
                 return []
 
+            if spec.get("isActive", False) is not True:
+                return []
+
             return [
                 {
                     "group_name": rule.get("groupName"),
                     "return_value": rule.get("returnValue", {}),
                 }
                 for rule in spec.get("rules", [])
-                if rule.get("isExperimentGroup") is not False
+                if rule.get("isExperimentGroup", False) is True
             ]
 
         return self._errorBoundary.capture(
